@@ -125,6 +125,7 @@ pub const Type = extern union {
 
             .anyerror_void_error_union, .error_union => return .ErrorUnion,
 
+            .async_frame => return .Frame,
             .anyframe_T, .@"anyframe" => return .AnyFrame,
 
             .empty_struct,
@@ -807,6 +808,12 @@ pub const Type = extern union {
                 return a.elemType2().eql(b.elemType2(), mod);
             },
 
+            .async_frame => {
+                const a_fn = a.castTag(.async_frame).?.data;
+                const b_fn = b.castTag(.async_frame).?.data;
+                return a_fn == b_fn;
+            },
+
             .empty_struct => {
                 const a_namespace = a.castTag(.empty_struct).?.data;
                 const b_namespace = (b.castTag(.empty_struct) orelse return false).data;
@@ -1154,6 +1161,13 @@ pub const Type = extern union {
 
                 const payload_ty = ty.errorUnionPayload();
                 hashWithHasher(payload_ty, hasher, mod);
+            },
+
+            .async_frame => {
+                std.hash.autoHash(hasher, std.builtin.TypeId.Frame);
+                const func = ty.castTag(.async_frame).?.data;
+                const decl: Module.Decl.Index = func.owner_decl;
+                std.hash.autoHash(hasher, decl);
             },
 
             .anyframe_T => {
@@ -1504,6 +1518,7 @@ pub const Type = extern union {
             .enum_numbered => return self.copyPayloadShallow(allocator, Payload.EnumNumbered),
             .enum_full, .enum_nonexhaustive => return self.copyPayloadShallow(allocator, Payload.EnumFull),
             .@"opaque" => return self.copyPayloadShallow(allocator, Payload.Opaque),
+            .async_frame => return self.copyPayloadShallow(allocator, Payload.AsyncFrame),
         }
     }
 
@@ -1923,6 +1938,7 @@ pub const Type = extern union {
                 .inferred_alloc_const => return writer.writeAll("(inferred_alloc_const)"),
                 .inferred_alloc_mut => return writer.writeAll("(inferred_alloc_mut)"),
                 .generic_poison => return writer.writeAll("(generic poison)"),
+                .async_frame => return writer.writeAll("(async frame)"),
             }
             unreachable;
         }
@@ -2273,6 +2289,13 @@ pub const Type = extern union {
                 }
                 try writer.writeAll("}");
             },
+            .async_frame => {
+                const func = ty.castTag(.async_frame).?.data;
+                const owner_decl = mod.declPtr(func.owner_decl);
+                try writer.writeAll("@Frame(");
+                try owner_decl.renderFullyQualifiedName(mod, writer);
+                try writer.writeAll(")");
+            },
         }
     }
 
@@ -2418,6 +2441,7 @@ pub const Type = extern union {
             .error_union,
             .error_set,
             .error_set_merged,
+            .async_frame,
             => return true,
 
             // Pointers to zero-bit types still have a runtime address; however, pointers
@@ -2685,6 +2709,7 @@ pub const Type = extern union {
             .anon_struct,
             .empty_struct_literal,
             .empty_struct,
+            .async_frame,
             => false,
 
             .enum_full,
@@ -3169,6 +3194,11 @@ pub const Type = extern union {
             .type_info,
             => return AbiAlignmentAdvanced{ .scalar = 0 },
 
+            .async_frame => {
+                // TODO revisit this
+                return AbiAlignmentAdvanced{ .scalar = 16 };
+            },
+
             .noreturn,
             .inferred_alloc_const,
             .inferred_alloc_mut,
@@ -3553,10 +3583,25 @@ pub const Type = extern union {
                 }
                 return AbiSizeAdvanced{ .scalar = size };
             },
+
+            .async_frame => {
+                switch (strat) {
+                    .sema_kit => |sk| {
+                        _ = sk;
+                        @panic("they asked for the size of an async frame with sema kit");
+                    },
+                    .lazy => |arena| {
+                        return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(arena, ty) };
+                    },
+                    .eager => {
+                        @panic("they eagerly asked for the size of an async frame");
+                    },
+                }
+            },
         }
     }
 
-    pub fn abiSizeAdvancedUnion(
+    fn abiSizeAdvancedUnion(
         ty: Type,
         target: Target,
         strat: AbiAlignmentAdvancedStrat,
@@ -3766,6 +3811,10 @@ pub const Type = extern union {
                 // Optionals and error unions are not packed so their bitsize
                 // includes padding bits.
                 return (try abiSizeAdvanced(ty, target, strat)).scalar * 8;
+            },
+
+            .async_frame => {
+                @panic("TODO bitSize async_frame");
             },
 
             .atomic_order,
@@ -5023,6 +5072,7 @@ pub const Type = extern union {
             .single_mut_pointer,
             .pointer,
             .bound_fn,
+            .async_frame,
             => return null,
 
             .optional => {
@@ -5206,6 +5256,7 @@ pub const Type = extern union {
             .int_signed,
             .int_unsigned,
             .enum_simple,
+            .async_frame,
             => false,
 
             .single_const_pointer_to_comptime_int,
@@ -6097,6 +6148,7 @@ pub const Type = extern union {
         enum_numbered,
         enum_full,
         enum_nonexhaustive,
+        async_frame,
 
         pub const last_no_payload_tag = Tag.bound_fn;
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
@@ -6215,6 +6267,7 @@ pub const Type = extern union {
                 .empty_struct => Payload.ContainerScope,
                 .tuple => Payload.Tuple,
                 .anon_struct => Payload.AnonStruct,
+                .async_frame => Payload.AsyncFrame,
             };
         }
 
@@ -6497,6 +6550,11 @@ pub const Type = extern union {
             base: Payload = .{ .tag = .enum_numbered },
             data: *Module.EnumNumbered,
         };
+
+        pub const AsyncFrame = struct {
+            base: Payload = .{ .tag = .anon_struct },
+            data: *Module.Fn,
+        };
     };
 
     pub const @"u1" = initTag(.u1);
@@ -6674,6 +6732,10 @@ pub const Type = extern union {
             .error_set = error_set,
             .payload = payload,
         });
+    }
+
+    pub fn asyncFrame(arena: Allocator, func: *Module.Fn) !Type {
+        return Type.Tag.async_frame.create(arena, func);
     }
 
     pub fn smallestUnsignedBits(max: u64) u16 {
