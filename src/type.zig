@@ -4198,6 +4198,7 @@ pub const Type = extern union {
             .pointer => ty.castTag(.pointer).?.data.pointee_type,
 
             .var_args_param => ty,
+            .anyframe_T => ty.castTag(.anyframe_T).?.data,
 
             else => unreachable,
         };
