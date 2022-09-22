@@ -1127,11 +1127,7 @@ fn nosuspendExpr(
     return expr(gz, scope, ri, body_node);
 }
 
-fn suspendExpr(
-    gz: *GenZir,
-    scope: *Scope,
-    node: Ast.Node.Index,
-) InnerError!Zir.Inst.Ref {
+fn suspendExpr(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -2437,7 +2433,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .bit_or,
             .block,
             .block_inline,
-            .suspend_block,
             .loop,
             .bool_br_and,
             .bool_br_or,
@@ -2678,6 +2673,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .save_err_ret_index,
             .restore_err_ret_index,
             .async_call,
+            .suspend_block,
             => break :b true,
 
             .@"defer" => unreachable,

@@ -256,7 +256,10 @@ pub fn categorizeOperand(
         .work_group_id,
         => return .none,
 
-        .fence => return .write,
+        .suspend_begin,
+        .suspend_end,
+        .fence,
+        => return .write,
 
         .not,
         .bitcast,
@@ -936,6 +939,8 @@ fn analyzeInst(
         .work_item_id,
         .work_group_size,
         .work_group_id,
+        .suspend_begin,
+        .suspend_end,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
