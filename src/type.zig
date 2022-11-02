@@ -3587,8 +3587,7 @@ pub const Type = extern union {
 
             .async_frame => {
                 switch (strat) {
-                    .sema_kit => |sk| {
-                        _ = sk;
+                    .sema => {
                         @panic("they asked for the size of an async frame with sema kit");
                     },
                     .lazy => |arena| {

@@ -1673,6 +1673,8 @@ fn removeInstDeaths(
         .work_item_id,
         .work_group_size,
         .work_group_id,
+        .suspend_begin,
+        .suspend_end,
         => {},
 
         .not,
@@ -1799,6 +1801,12 @@ fn removeInstDeaths(
                 death_remover.feed(operand);
             }
             death_remover.finish();
+        },
+        .call_async => {
+            @panic("TODO");
+        },
+        .call_async_alloc => {
+            @panic("TODO");
         },
         .select => {
             const pl_op = inst_datas[inst].pl_op;
