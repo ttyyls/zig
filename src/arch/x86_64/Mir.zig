@@ -402,6 +402,9 @@ pub const Inst = struct {
         /// Linker relocation - imports table indirection (binding).
         /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
         import_reloc,
+        /// Linker relocation - threadlocal variable.
+        /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
+        tlv_reloc,
     };
 
     pub const Data = union {

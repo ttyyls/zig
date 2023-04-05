@@ -912,11 +912,13 @@ fn lowerDeclRef(
 /// * got - the value is referenced indirectly via GOT entry index (the linker emits a got-type reloc)
 /// * direct - the value is referenced directly via symbol index index (the linker emits a displacement reloc)
 /// * import - the value is referenced indirectly via import entry index (the linker emits an import-type reloc)
+/// * tlv - the value is a threadlocal variable
 pub const LinkerLoad = struct {
     type: enum {
         got,
         direct,
         import,
+        tlv,
     },
     sym_index: u32,
 };
@@ -987,6 +989,8 @@ fn genDeclRef(
 
     module.markDeclAlive(decl);
 
+    const is_threadlocal = tv.val.isPtrToThreadLocal(module) and !bin_file.options.single_threaded;
+
     if (bin_file.cast(link.File.Elf)) |elf_file| {
         const atom_index = try elf_file.getOrCreateAtomForDecl(decl_index);
         const atom = elf_file.getAtom(atom_index);
@@ -995,7 +999,7 @@ fn genDeclRef(
         const atom_index = try macho_file.getOrCreateAtomForDecl(decl_index);
         const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
         return GenResult.mcv(.{ .linker_load = .{
-            .type = .got,
+            .type = if (is_threadlocal) .tlv else .got,
             .sym_index = sym_index,
         } });
     } else if (bin_file.cast(link.File.Coff)) |coff_file| {

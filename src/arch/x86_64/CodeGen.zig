@@ -3627,6 +3627,7 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 .got => .got_reloc,
                 .direct => .direct_reloc,
                 .import => .import_reloc,
+                .tlv => .tlv_reloc,
             };
             _ = try self.addInst(.{
                 .tag = .lea_linker,
