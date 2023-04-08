@@ -126,6 +126,7 @@ pub fn lowerMir(lower: *Lower, inst: Mir.Inst) Error![]const Instruction {
 
         .call_extern => try lower.emit(.none, .call, &.{.{ .imm = Immediate.s(0) }}),
 
+        .mov_linker => try lower.mirMovLinker(inst),
         .lea_linker => try lower.mirLeaLinker(inst),
 
         .mov_moffs => try lower.mirMovMoffs(inst),
@@ -435,8 +436,17 @@ fn mirPushPopRegisterList(lower: *Lower, inst: Mir.Inst) Error!void {
     }
 }
 
+fn mirMovLinker(lower: *Lower, inst: Mir.Inst) Error!void {
+    const metadata = lower.mir.extraData(Mir.LoadRegisterReloc, inst.data.payload).data;
+    const reg = @intToEnum(Register, metadata.reg);
+    try lower.emit(.none, .mov, &.{
+        .{ .reg = reg },
+        .{ .mem = Memory.rip(Memory.PtrSize.fromBitSize(reg.bitSize()), 0) },
+    });
+}
+
 fn mirLeaLinker(lower: *Lower, inst: Mir.Inst) Error!void {
-    const metadata = lower.mir.extraData(Mir.LeaRegisterReloc, inst.data.payload).data;
+    const metadata = lower.mir.extraData(Mir.LoadRegisterReloc, inst.data.payload).data;
     const reg = @intToEnum(Register, metadata.reg);
     try lower.emit(.none, .lea, &.{
         .{ .reg = reg },

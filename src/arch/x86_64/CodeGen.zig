@@ -3629,15 +3629,36 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 .import => .import_reloc,
                 .tlv => .tlv_reloc,
             };
-            _ = try self.addInst(.{
-                .tag = .lea_linker,
-                .ops = ops,
-                .data = .{ .payload = try self.addExtra(Mir.LeaRegisterReloc{
-                    .reg = @enumToInt(registerAlias(reg, abi_size)),
-                    .atom_index = atom_index,
-                    .sym_index = load_struct.sym_index,
-                }) },
-            });
+
+            switch (load_struct.type) {
+                .tlv => {
+                    if (self.bin_file.cast(link.File.MachO)) |_| {
+                        // TODO: spill
+                        _ = try self.addInst(.{
+                            .tag = .mov_linker,
+                            .ops = ops,
+                            .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
+                                .reg = @enumToInt(registerAlias(.rdi, abi_size)),
+                                .atom_index = atom_index,
+                                .sym_index = load_struct.sym_index,
+                            }) },
+                        });
+                        try self.asmMemory(.call, Memory.sib(.qword, .{ .base = .rdi }));
+                        try self.genSetReg(ptr_ty, reg, .{ .register = .rax });
+                    } else return self.fail("TODO emit TLV on other linker backends", .{});
+                },
+                else => {
+                    _ = try self.addInst(.{
+                        .tag = .lea_linker,
+                        .ops = ops,
+                        .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
+                            .reg = @enumToInt(registerAlias(reg, abi_size)),
+                            .atom_index = atom_index,
+                            .sym_index = load_struct.sym_index,
+                        }) },
+                    });
+                },
+            }
         },
         .memory => |addr| {
             // TODO: in case the address fits in an imm32 we can use [ds:imm32]

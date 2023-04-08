@@ -233,6 +233,8 @@ pub const Inst = struct {
 
         /// Load effective address of a symbol not yet allocated in VM.
         lea_linker,
+        /// Move address of a symbol not yet allocated in VM.
+        mov_linker,
 
         /// End of prologue
         dbg_prologue_end,
@@ -394,16 +396,16 @@ pub const Inst = struct {
         /// Uses `reloc` payload.
         reloc,
         /// Linker relocation - GOT indirection.
-        /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
+        /// Uses `payload` payload with extra data of type `LoadRegisterReloc`.
         got_reloc,
         /// Linker relocation - direct reference.
-        /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
+        /// Uses `payload` payload with extra data of type `LoadRegisterReloc`.
         direct_reloc,
         /// Linker relocation - imports table indirection (binding).
-        /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
+        /// Uses `payload` payload with extra data of type `LoadRegisterReloc`.
         import_reloc,
         /// Linker relocation - threadlocal variable.
-        /// Uses `payload` payload with extra data of type `LeaRegisterReloc`.
+        /// Uses `payload` payload with extra data of type `LoadRegisterReloc`.
         tlv_reloc,
     };
 
@@ -511,7 +513,7 @@ pub const Inst = struct {
     }
 };
 
-pub const LeaRegisterReloc = struct {
+pub const LoadRegisterReloc = struct {
     /// Destination register.
     reg: u32,
     /// Index of the containing atom.

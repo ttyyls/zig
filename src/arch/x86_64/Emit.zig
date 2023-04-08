@@ -65,9 +65,9 @@ pub fn emitMir(emit: *Emit) Error!void {
                 });
             } else return emit.fail("TODO implement {} for {}", .{ inst.tag, emit.bin_file.tag }),
 
-            .lea_linker => if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
+            .mov_linker, .lea_linker => if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
                 const metadata =
-                    emit.lower.mir.extraData(Mir.LeaRegisterReloc, inst.data.payload).data;
+                    emit.lower.mir.extraData(Mir.LoadRegisterReloc, inst.data.payload).data;
                 const atom_index = macho_file.getAtomIndexForSymbol(.{
                     .sym_index = metadata.atom_index,
                     .file = null,
@@ -87,7 +87,7 @@ pub fn emitMir(emit: *Emit) Error!void {
                 });
             } else if (emit.bin_file.cast(link.File.Coff)) |coff_file| {
                 const metadata =
-                    emit.lower.mir.extraData(Mir.LeaRegisterReloc, inst.data.payload).data;
+                    emit.lower.mir.extraData(Mir.LoadRegisterReloc, inst.data.payload).data;
                 const atom_index = coff_file.getAtomIndexForSymbol(.{
                     .sym_index = metadata.atom_index,
                     .file = null,
