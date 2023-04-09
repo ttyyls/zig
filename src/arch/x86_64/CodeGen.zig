@@ -129,7 +129,7 @@ pub const MCValue = union(enum) {
     register_overflow: struct { reg: Register, eflags: Condition },
     /// The value is in memory at a hard-coded address.
     /// If the type is a pointer, it means the pointer address is at this memory location.
-    memory: u64,
+    memory_load: codegen.MemoryLoad,
     /// The value is in memory but requires a linker relocation fixup.
     linker_load: codegen.LinkerLoad,
     /// The value is one of the stack variables.
@@ -142,7 +142,7 @@ pub const MCValue = union(enum) {
 
     fn isMemory(mcv: MCValue) bool {
         return switch (mcv) {
-            .memory,
+            .memory_load,
             .stack_offset,
             .ptr_stack_offset,
             .linker_load,
@@ -2883,7 +2883,7 @@ fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) !void {
                 .disp = -off,
             }));
         },
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             try self.loadMemPtrIntoRegister(addr_reg, Type.usize, array);
         },
         else => return self.fail("TODO implement array_elem_val when array is {}", .{array}),
@@ -3538,7 +3538,10 @@ fn load(self: *Self, dst_mcv: MCValue, ptr: MCValue, ptr_ty: Type) InnerError!vo
         .eflags => unreachable,
         .register_overflow => unreachable,
         .immediate => |imm| {
-            try self.setRegOrMem(elem_ty, dst_mcv, .{ .memory = imm });
+            try self.setRegOrMem(elem_ty, dst_mcv, .{ .memory_load = .{
+                .type = .direct,
+                .address = imm,
+            } });
         },
         .stack_offset => {
             const reg = try self.copyToTmpRegister(ptr_ty, ptr);
@@ -3579,7 +3582,7 @@ fn load(self: *Self, dst_mcv: MCValue, ptr: MCValue, ptr_ty: Type) InnerError!vo
                 else => return self.fail("TODO implement loading from register into {}", .{dst_mcv}),
             }
         },
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             const reg = try self.copyToTmpRegister(ptr_ty, ptr);
             try self.load(dst_mcv, .{ .register = reg }, ptr_ty);
         },
@@ -3623,12 +3626,6 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 const atom = try coff_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
                 break :blk coff_file.getAtom(atom).getSymbolIndex().?;
             } else unreachable;
-            const ops: Mir.Inst.Ops = switch (load_struct.type) {
-                .got => .got_reloc,
-                .direct => .direct_reloc,
-                .import => .import_reloc,
-                .tlv => .tlv_reloc,
-            };
 
             switch (load_struct.type) {
                 .tlv => {
@@ -3636,7 +3633,7 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                         // TODO: spill
                         _ = try self.addInst(.{
                             .tag = .mov_linker,
-                            .ops = ops,
+                            .ops = .tlv_reloc,
                             .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
                                 .reg = @enumToInt(registerAlias(.rdi, abi_size)),
                                 .atom_index = atom_index,
@@ -3647,9 +3644,27 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                         try self.genSetReg(ptr_ty, reg, .{ .register = .rax });
                     } else return self.fail("TODO emit TLV on other linker backends", .{});
                 },
-                else => {
+
+                .direct => {
                     _ = try self.addInst(.{
                         .tag = .lea_linker,
+                        .ops = .direct_reloc,
+                        .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
+                            .reg = @enumToInt(registerAlias(reg, abi_size)),
+                            .atom_index = atom_index,
+                            .sym_index = load_struct.sym_index,
+                        }) },
+                    });
+                },
+
+                else => {
+                    const ops: Mir.Inst.Ops = switch (load_struct.type) {
+                        .got => .got_reloc,
+                        .import => .import_reloc,
+                        else => unreachable,
+                    };
+                    _ = try self.addInst(.{
+                        .tag = .mov_linker,
                         .ops = ops,
                         .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
                             .reg = @enumToInt(registerAlias(reg, abi_size)),
@@ -3660,10 +3675,18 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 },
             }
         },
-        .memory => |addr| {
-            // TODO: in case the address fits in an imm32 we can use [ds:imm32]
-            // instead of wasting an instruction copying the address to a register
-            try self.genSetReg(ptr_ty, reg, .{ .immediate = addr });
+        .memory_load => |load_struct| {
+            switch (load_struct.type) {
+                .direct => {
+                    // TODO: in case the address fits in an imm32 we can use [ds:imm32]
+                    // instead of wasting an instruction copying the address to a register
+                    try self.genSetReg(ptr_ty, reg, .{ .immediate = load_struct.address });
+                },
+                .got => {
+                    try self.genSetReg(ptr_ty, reg, .{ .immediate = load_struct.address });
+                    try self.asmRegisterMemory(.mov, reg, Memory.sib(.qword, .{ .base = reg }));
+                },
+            }
         },
         else => unreachable,
     }
@@ -3772,7 +3795,7 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
                         -@intCast(i32, overflow_bit_offset),
                     );
                 },
-                .memory, .linker_load => if (abi_size <= 8) {
+                .memory_load, .linker_load => if (abi_size <= 8) {
                     const tmp_reg = try self.copyToTmpRegister(value_ty, value);
                     const tmp_lock = self.register_manager.lockRegAssumeUnused(tmp_reg);
                     defer self.register_manager.unlockReg(tmp_lock);
@@ -3812,7 +3835,7 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
                 },
             }
         },
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             const value_lock: ?RegisterLock = switch (value) {
                 .register => |reg| self.register_manager.lockReg(reg),
                 else => null,
@@ -3824,12 +3847,6 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
             defer self.register_manager.unlockReg(addr_reg_lock);
 
             try self.loadMemPtrIntoRegister(addr_reg, ptr_ty, ptr);
-            // Load the pointer, which is stored in memory
-            try self.asmRegisterMemory(
-                .mov,
-                addr_reg.to64(),
-                Memory.sib(.qword, .{ .base = addr_reg.to64() }),
-            );
 
             const new_ptr = MCValue{ .register = addr_reg.to64() };
             try self.store(new_ptr, value, ptr_ty, value_ty);
@@ -4161,7 +4178,7 @@ fn genUnOpMir(self: *Self, mir_tag: Mir.Inst.Tag, dst_ty: Type, dst_mcv: MCValue
             }));
         },
         .ptr_stack_offset => unreachable,
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             const addr_reg = (try self.register_manager.allocReg(null, gp)).to64();
             const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_reg_lock);
@@ -4818,7 +4835,7 @@ fn genBinOp(
                         }),
                         cc,
                     ),
-                    .memory, .linker_load => {
+                    .memory_load, .linker_load => {
                         const addr_reg = (try self.register_manager.allocReg(null, gp)).to64();
                         const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
                         defer self.register_manager.unlockReg(addr_reg_lock);
@@ -4924,7 +4941,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                         )),
                     else => unreachable,
                 },
-                .memory, .linker_load, .eflags => {
+                .memory_load, .linker_load, .eflags => {
                     assert(abi_size <= 8);
                     const dst_reg_lock = self.register_manager.lockReg(dst_reg);
                     defer if (dst_reg_lock) |lock| self.register_manager.unlockReg(lock);
@@ -4939,13 +4956,13 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                 ),
             }
         },
-        .memory, .linker_load, .stack_offset => {
+        .memory_load, .linker_load, .stack_offset => {
             const dst: ?struct {
                 addr_reg: Register,
                 addr_lock: RegisterLock,
             } = switch (dst_mcv) {
                 else => unreachable,
-                .memory, .linker_load => dst: {
+                .memory_load, .linker_load => dst: {
                     const dst_addr_reg = try self.register_manager.allocReg(null, gp);
                     const dst_addr_lock = self.register_manager.lockRegAssumeUnused(dst_addr_reg);
                     errdefer self.register_manager.unlockReg(dst_addr_lock);
@@ -4967,7 +4984,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                 addr_lock: RegisterLock,
             } = switch (src_mcv) {
                 else => null,
-                .memory, .linker_load => src: {
+                .memory_load, .linker_load => src: {
                     const src_limb_reg = try self.register_manager.allocReg(null, gp);
                     const src_limb_lock = self.register_manager.lockRegAssumeUnused(src_limb_reg);
                     errdefer self.register_manager.unlockReg(src_limb_lock);
@@ -5018,7 +5035,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                             .base = .rbp,
                             .disp = off - dst_off,
                         },
-                        .memory, .linker_load => .{ .base = dst.?.addr_reg, .disp = off },
+                        .memory_load, .linker_load => .{ .base = dst.?.addr_reg, .disp = off },
                     },
                 );
                 switch (src_mcv) {
@@ -5082,7 +5099,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                             else => unreachable,
                         }
                     },
-                    .memory, .linker_load => {
+                    .memory_load, .linker_load => {
                         try self.asmRegisterMemory(
                             .mov,
                             registerAlias(src.?.limb_reg, limb_abi_size),
@@ -5171,7 +5188,7 @@ fn genIntMulComplexOpMir(self: *Self, dst_ty: Type, dst_mcv: MCValue, src_mcv: M
                         Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = .rbp, .disp = -off }),
                     );
                 },
-                .memory => {
+                .memory_load => {
                     return self.fail("TODO implement x86 multiply source memory", .{});
                 },
                 .linker_load => {
@@ -5210,7 +5227,10 @@ fn genIntMulComplexOpMir(self: *Self, dst_ty: Type, dst_mcv: MCValue, src_mcv: M
 
                     return self.genSetStack(dst_ty, off, .{ .register = dst_reg }, .{});
                 },
-                .memory, .stack_offset => {
+                .stack_offset => {
+                    return self.fail("TODO implement x86 multiply source stack memory", .{});
+                },
+                .memory_load => {
                     return self.fail("TODO implement x86 multiply source memory", .{});
                 },
                 .linker_load => {
@@ -5221,7 +5241,7 @@ fn genIntMulComplexOpMir(self: *Self, dst_ty: Type, dst_mcv: MCValue, src_mcv: M
                 },
             }
         },
-        .memory => {
+        .memory_load => {
             return self.fail("TODO implement x86 multiply destination memory", .{});
         },
         .linker_load => {
@@ -5305,7 +5325,8 @@ fn genVarDbgInfo(
                     .fp_register = Register.rbp.dwarfLocOpDeref(),
                     .offset = -off,
                 } },
-                .memory => |address| .{ .memory = address },
+                // TODO: this looks sus here as we flatten MemoryLoad into a single address cell
+                .memory_load => |memory_load| .{ .memory = memory_load.address },
                 .linker_load => |linker_load| .{ .linker_load = linker_load },
                 .immediate => |x| .{ .immediate = x },
                 .undef => .undef,
@@ -5406,7 +5427,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             .immediate => unreachable,
             .unreach => unreachable,
             .dead => unreachable,
-            .memory => unreachable,
+            .memory_load => unreachable,
             .linker_load => unreachable,
             .eflags => unreachable,
             .register_overflow => unreachable,
@@ -5444,7 +5465,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             .immediate => unreachable,
             .unreach => unreachable,
             .dead => unreachable,
-            .memory => unreachable,
+            .memory_load => unreachable,
             .linker_load => unreachable,
             .eflags => unreachable,
             .register_overflow => unreachable,
@@ -5989,7 +6010,7 @@ fn isNull(self: *Self, inst: Air.Inst.Index, opt_ty: Type, opt_mcv: MCValue) !MC
             return .{ .eflags = .nc };
         },
 
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             const addr_reg = (try self.register_manager.allocReg(null, gp)).to64();
             const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_reg_lock);
@@ -6853,9 +6874,6 @@ fn setRegOrMem(self: *Self, ty: Type, loc: MCValue, val: MCValue) !void {
         .immediate => unreachable,
         .register => |reg| return self.genSetReg(ty, reg, val),
         .stack_offset => |off| return self.genSetStack(ty, off, val, .{}),
-        .memory => {
-            return self.fail("TODO implement setRegOrMem for memory", .{});
-        },
         else => {
             return self.fail("TODO implement setRegOrMem for {}", .{loc});
         },
@@ -6907,7 +6925,7 @@ fn genSetStackArg(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue) InnerE
                 else => return self.fail("TODO implement inputs on stack for {} with abi size > 8", .{mcv}),
             }
         },
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             if (abi_size <= 8) {
                 const reg = try self.copyToTmpRegister(ty, mcv);
                 return self.genSetStackArg(ty, stack_offset, MCValue{ .register = reg });
@@ -7117,7 +7135,7 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
                 },
             }
         },
-        .memory, .linker_load => if (abi_size <= 8) {
+        .memory_load, .linker_load => if (abi_size <= 8) {
             const reg = try self.copyToTmpRegister(ty, mcv);
             return self.genSetStack(ty, stack_offset, MCValue{ .register = reg }, opts);
         } else {
@@ -7235,10 +7253,8 @@ fn genInlineMemcpy(
     try self.spillRegisters(&.{ .rdi, .rsi, .rcx });
 
     switch (dst_ptr) {
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             try self.loadMemPtrIntoRegister(.rdi, Type.usize, dst_ptr);
-            // Load the pointer, which is stored in memory
-            try self.asmRegisterMemory(.mov, .rdi, Memory.sib(.qword, .{ .base = .rdi }));
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (dst_ptr) {
@@ -7263,10 +7279,8 @@ fn genInlineMemcpy(
     }
 
     switch (src_ptr) {
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             try self.loadMemPtrIntoRegister(.rsi, Type.usize, src_ptr);
-            // Load the pointer, which is stored in memory
-            try self.asmRegisterMemory(.mov, .rsi, Memory.sib(.qword, .{ .base = .rsi }));
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (src_ptr) {
@@ -7314,10 +7328,8 @@ fn genInlineMemset(
     try self.spillRegisters(&.{ .rdi, .al, .rcx });
 
     switch (dst_ptr) {
-        .memory, .linker_load => {
+        .memory_load, .linker_load => {
             try self.loadMemPtrIntoRegister(.rdi, Type.usize, dst_ptr);
-            // Load the pointer, which is stored in memory
-            try self.asmRegisterMemory(.mov, .rdi, Memory.sib(.qword, .{ .base = .rdi }));
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (dst_ptr) {
@@ -7442,7 +7454,7 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
 
             try self.asmRegisterRegister(.mov, registerAlias(reg, abi_size), registerAlias(src_reg, abi_size));
         },
-        .memory, .linker_load => switch (ty.zigTypeTag()) {
+        .memory_load, .linker_load => switch (ty.zigTypeTag()) {
             .Float => {
                 const base_reg = try self.register_manager.allocReg(null, gp);
                 try self.loadMemPtrIntoRegister(base_reg, Type.usize, mcv);
@@ -7465,42 +7477,41 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
             },
             else => switch (mcv) {
                 else => unreachable,
-                .linker_load => {
+                .memory_load, .linker_load => {
                     try self.loadMemPtrIntoRegister(reg, Type.usize, mcv);
-                    try self.asmRegisterMemory(
-                        .mov,
-                        registerAlias(reg, abi_size),
-                        Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = reg.to64() }),
-                    );
                 },
-                .memory => |x| if (x <= math.maxInt(i32)) {
-                    try self.asmRegisterMemory(
-                        .mov,
-                        registerAlias(reg, abi_size),
-                        Memory.sib(Memory.PtrSize.fromSize(abi_size), .{
-                            .base = .ds,
-                            .disp = @intCast(i32, x),
-                        }),
-                    );
-                } else {
-                    if (reg.to64() == .rax) {
-                        // If this is RAX, we can use a direct load.
-                        // Otherwise, we need to load the address, then indirectly load the value.
-                        _ = try self.addInst(.{
-                            .tag = .mov_moffs,
-                            .ops = .rax_moffs,
-                            .data = .{ .payload = try self.addExtra(Mir.MemoryMoffs.encode(.ds, x)) },
-                        });
-                    } else {
-                        // Rather than duplicate the logic used for the move, we just use a self-call with a new MCValue.
-                        try self.genSetReg(ty, reg, MCValue{ .immediate = x });
-                        try self.asmRegisterMemory(
-                            .mov,
-                            registerAlias(reg, abi_size),
-                            Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = reg.to64() }),
-                        );
-                    }
-                },
+                // TODO: bring back optimisations for direct memory load
+                // .memory_load => {
+                // if (x <= math.maxInt(i32)) {
+                //     try self.asmRegisterMemory(
+                //         .mov,
+                //         registerAlias(reg, abi_size),
+                //         Memory.sib(Memory.PtrSize.fromSize(abi_size), .{
+                //             .base = .ds,
+                //             .disp = @intCast(i32, x),
+                //         }),
+                //     );
+                // } else {
+                //     if (reg.to64() == .rax) {
+                //         // If this is RAX, we can use a direct load.
+                //         // Otherwise, we need to load the address, then indirectly load the value.
+                //         _ = try self.addInst(.{
+                //             .tag = .mov_moffs,
+                //             .ops = .rax_moffs,
+                //             .data = .{ .payload = try self.addExtra(Mir.MemoryMoffs.encode(.ds, x)) },
+                //         });
+                //     } else {
+                //         // Rather than duplicate the logic used for the move, we just use a self-call with a new MCValue.
+                //         try self.genSetReg(ty, reg, MCValue{ .immediate = x });
+                //         try self.asmRegisterMemory(
+                //             .mov,
+                //             registerAlias(reg, abi_size),
+                //             Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = reg.to64() }),
+                //         );
+                //     }
+                // }
+
+                // },
             },
         },
         .stack_offset => |off| {
@@ -8435,8 +8446,8 @@ fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
             .none => .none,
             .undef => .undef,
             .linker_load => |ll| .{ .linker_load = ll },
+            .memory_load => |ml| .{ .memory_load = ml },
             .immediate => |imm| .{ .immediate = imm },
-            .memory => |addr| .{ .memory = addr },
         },
         .fail => |msg| {
             self.err_msg = msg;

@@ -3925,7 +3925,7 @@ fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
             .undef => .undef,
             .linker_load => unreachable, // TODO
             .immediate => |imm| .{ .immediate = imm },
-            .memory => |addr| .{ .memory = addr },
+            .memory_load => |ml| .{ .memory = ml.address }, // TODO: this is incorrect!
         },
         .fail => |msg| {
             self.err_msg = msg;

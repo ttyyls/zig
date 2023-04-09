@@ -923,6 +923,14 @@ pub const LinkerLoad = struct {
     sym_index: u32,
 };
 
+pub const MemoryLoad = struct {
+    type: enum {
+        got,
+        direct,
+    },
+    address: u64,
+};
+
 pub const GenResult = union(enum) {
     mcv: MCValue,
     fail: *ErrorMsg,
@@ -934,8 +942,8 @@ pub const GenResult = union(enum) {
         /// such as ARM, the immediate will never exceed 32-bits.
         immediate: u64,
         linker_load: LinkerLoad,
-        /// Direct by-address reference to memory location.
-        memory: u64,
+        /// By-address reference to memory location.
+        memory_load: MemoryLoad,
     };
 
     fn mcv(val: MCValue) GenResult {
@@ -994,7 +1002,10 @@ fn genDeclRef(
     if (bin_file.cast(link.File.Elf)) |elf_file| {
         const atom_index = try elf_file.getOrCreateAtomForDecl(decl_index);
         const atom = elf_file.getAtom(atom_index);
-        return GenResult.mcv(.{ .memory = atom.getOffsetTableAddress(elf_file) });
+        return GenResult.mcv(.{ .memory_load = .{
+            .type = .got,
+            .address = atom.getOffsetTableAddress(elf_file),
+        } });
     } else if (bin_file.cast(link.File.MachO)) |macho_file| {
         const atom_index = try macho_file.getOrCreateAtomForDecl(decl_index);
         const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
@@ -1013,7 +1024,10 @@ fn genDeclRef(
         const decl_block_index = try p9.seeDecl(decl_index);
         const decl_block = p9.getDeclBlock(decl_block_index);
         const got_addr = p9.bases.data + decl_block.got_index.? * ptr_bytes;
-        return GenResult.mcv(.{ .memory = got_addr });
+        return GenResult.mcv(.{ .memory_load = .{
+            .type = .got,
+            .address = got_addr,
+        } });
     } else {
         return GenResult.fail(bin_file.allocator, src_loc, "TODO genDeclRef for target {}", .{target});
     }
@@ -1033,7 +1047,10 @@ fn genUnnamedConst(
         return GenResult.fail(bin_file.allocator, src_loc, "lowering unnamed constant failed: {s}", .{@errorName(err)});
     };
     if (bin_file.cast(link.File.Elf)) |elf_file| {
-        return GenResult.mcv(.{ .memory = elf_file.getSymbol(local_sym_index).st_value });
+        return GenResult.mcv(.{ .memory_load = .{
+            .type = .direct,
+            .address = elf_file.getSymbol(local_sym_index).st_value,
+        } });
     } else if (bin_file.cast(link.File.MachO)) |_| {
         return GenResult.mcv(.{ .linker_load = .{
             .type = .direct,
@@ -1049,7 +1066,10 @@ fn genUnnamedConst(
         const ptr_bytes: u64 = @divExact(ptr_bits, 8);
         const got_index = local_sym_index; // the plan9 backend returns the got_index
         const got_addr = p9.bases.data + got_index * ptr_bytes;
-        return GenResult.mcv(.{ .memory = got_addr });
+        return GenResult.mcv(.{ .memory_load = .{
+            .type = .got,
+            .address = got_addr,
+        } });
     } else {
         return GenResult.fail(bin_file.allocator, src_loc, "TODO genUnnamedConst for target {}", .{target});
     }
